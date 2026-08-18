@@ -22,6 +22,13 @@ imports - so there was nothing storefront-specific to account for.)
 
 1. Download the latest Pad-of-Time release from GitHub.
 2. Extract the files into the folder where the game's exe (`POP.exe`) lives.
+
+Update: GoG updated the game in August 2026 adding SDL3 layer for gamepad support,
+the gamepads work, but you still cannot navigate the menus in their current state.
+
+If you still want to use my SDL2 solution - rename di.dll from game folder to di_original.dll and
+then put files from my archive to game folder near pop.exe and rename dinput8.dll (the one from my archive) to di.dll
+
 3. Turn off Steam Input for this game (Steam Input remaps your controller
    before the game ever sees it, which interferes with this proxy).
 4. Plug in your controller and launch the game. Open the in-game
