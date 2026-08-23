@@ -26,8 +26,8 @@ imports - so there was nothing storefront-specific to account for.)
    Update: GoG updated the game in August 2026 adding SDL3 layer for gamepad support,
    the gamepads work, but you still cannot navigate the menus in their current state.
 
-   If you still want to use my SDL2 solution - rename dinput8.dll to dinput8_pot.dll and
-   open gog.toml (the one in the game folder) via Notepad and change `#'dinput8.dll' = 'dinput8_wrap.dll'` to `'dinput8.dll' = 'dinput8_pot.dll'`.
+   If you still want to use my SDL2 solution - rename `dinput8.dll` to `dinput8_pot.dll` and
+   open `gog.toml` (the one in the game folder) via Notepad and change `#'dinput8.dll' = 'dinput8_wrap.dll'` to `'dinput8.dll' = 'dinput8_pot.dll'`.
 
 4. Turn off Steam Input for this game (Steam Input remaps your controller
    before the game ever sees it, which interferes with this proxy).
@@ -199,6 +199,8 @@ the Quick Start table above for what each one does in-game.
 | `Start` | `7` | - (unused: `[MenuMode] Enable=1` by default hijacks Start for the pause/Escape hotkey instead) |
 | `LS` | `8` | - |
 | `RS` | `9` | Reset Camera |
+
+<img width="1000" height="1000" alt="PoP-TSoT Xbox Mapping" src="https://github.com/user-attachments/assets/ac722df3-18cf-4db8-a633-4f93df5b7fd0" />
 
 ## Building from source
 
