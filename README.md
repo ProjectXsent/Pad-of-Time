@@ -26,12 +26,12 @@ imports - so there was nothing storefront-specific to account for.)
    Update: GoG updated the game in August 2026 adding SDL3 layer for gamepad support,
    the gamepads work, but you still cannot navigate the menus in their current state.
 
-   If you still want to use my SDL2 solution - rename di.dll from game folder to di_original.dll and
-   then put files from my archive to game folder near pop.exe and rename dinput8.dll (the one from my archive) to di.dll
+   If you still want to use my SDL2 solution - rename dinput8.dll to dinput8_pot.dll and
+   open gog.toml (the one in the game folder) via Notepad and change `#'dinput8.dll' = 'dinput8_wrap.dll'` to `'dinput8.dll' = 'dinput8_pot.dll'`.
 
-3. Turn off Steam Input for this game (Steam Input remaps your controller
+4. Turn off Steam Input for this game (Steam Input remaps your controller
    before the game ever sees it, which interferes with this proxy).
-4. Plug in your controller and launch the game. Open the in-game
+5. Plug in your controller and launch the game. Open the in-game
    **Controls → Gamepad** settings and bind your controller using the
    layout below.
 
