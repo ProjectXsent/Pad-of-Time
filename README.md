@@ -202,12 +202,12 @@ the Quick Start table above for what each one does in-game.
 | `RS` | `9` | Reset Camera |
 
 ## Building from source
+**Requirements:**
+- [CMake](https://cmake.org)
+- [Microsoft Visual Studio](https://visualstudio.microsoft.com) (2019 and above or use Visual Studio Build Tools)
 
 **On Windows (primary path, matches Pad-Within):**
-```
-cmake -B build -A Win32 -DSDL2_DIR=<path-to-SDL2-cmake-config-from-vcpkg>
-cmake --build build --config Release
-```
+- Run `build_release_x86.bat`.
 
 **Linux/MinGW (for CI or sandbox verification only):**
 ```
