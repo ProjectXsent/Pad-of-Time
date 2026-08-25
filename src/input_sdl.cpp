@@ -409,8 +409,8 @@ void Proxy_FillJoyBuffer(void* buf, int buttonsCapacity)
     // enabled (see Proxy_HandleGlobalHotkeys) - don't also forward it to
     // the game as a joystick button in that case.
     if (!g_cfg.enableMenuMode)
-        set(SDL_CONTROLLER_BUTTON_START, g_cfg.btnStart);
     set(SDL_CONTROLLER_BUTTON_BACK,          g_cfg.btnBack);
+    set(SDL_CONTROLLER_BUTTON_START,         g_cfg.btnStart);
     set(SDL_CONTROLLER_BUTTON_LEFTSTICK,     g_cfg.btnLS);
     set(SDL_CONTROLLER_BUTTON_RIGHTSTICK,    g_cfg.btnRS);
 
