@@ -18,6 +18,7 @@
 #include <cstring>
 
 #include <SDL.h>
+#include <SDL_gamecontroller.h>
 
 #include "proxy.h"
 #include "log.h"
@@ -29,6 +30,17 @@ static SDL_Joystick*       g_joy = nullptr;
 static SDL_GameController* g_pads[MAX_PADS] = {};
 static int                 g_padCount = 0;
 
+// Instance IDs (not device indices!) parallel to g_pads / g_joy. SDL device
+// indices shift around as controllers come and go, but instance IDs are
+// stable for the lifetime of a connection - SDL_JOYDEVICEREMOVED reports an
+// instance ID, so this is what lets hotplug removal find the right slot.
+static SDL_JoystickID g_padInstanceIds[MAX_PADS];
+static SDL_JoystickID g_joyInstanceId = -1;
+// Raw-fallback devices are opened after a short delay rather than instantly
+// (see MaybeOpenRawFallback), so we track when we first noticed an unmapped
+// joystick sitting around with nothing else claiming it.
+static DWORD g_rawFallbackFirstSeenUnmapped = 0;
+
 void Proxy_LogJoystickCountOnce()
 {
     static DWORD last = 0;
@@ -39,6 +51,162 @@ void Proxy_LogJoystickCountOnce()
     LOG("periodic: SDL_NumJoysticks()=%d, g_padCount=%d, g_pad=%p", nj, g_padCount, (void*)g_pad);
     for (int i = 0; i < nj; ++i) {
         LOG("  joy[%d] name='%s' isGC=%d", i, SDL_JoystickNameForIndex(i), SDL_IsGameController(i));
+    }
+}
+
+// ---------------------------------------------------------------------------
+//  Hotplug helpers
+//
+//  These are the only places that call SDL_GameControllerOpen/Close and
+//  SDL_JoystickOpen/Close for the "real" pad slots, so g_pads/g_padCount and
+//  g_joy stay consistent whether a device was opened at startup or plugged
+//  in later.
+// ---------------------------------------------------------------------------
+static bool OpenControllerAtDeviceIndex(int deviceIndex)
+{
+    if (g_padCount >= MAX_PADS) return false;
+    SDL_GameController* c = SDL_GameControllerOpen(deviceIndex);
+    if (!c) {
+        LOG("SDL_GameControllerOpen(%d) failed: %s", deviceIndex, SDL_GetError());
+        return false;
+    }
+    SDL_JoystickID instanceId = SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(c));
+    g_pads[g_padCount] = c;
+    g_padInstanceIds[g_padCount] = instanceId;
+    g_padCount++;
+    if (!g_pad) g_pad = c;
+    LOG("opened GameController (instance %d): %s", instanceId, SDL_GameControllerName(c));
+    return true;
+}
+
+static void RemoveControllerByInstanceId(SDL_JoystickID instanceId)
+{
+    for (int i = 0; i < g_padCount; ++i) {
+        if (g_padInstanceIds[i] != instanceId) continue;
+
+        SDL_GameController* removed = g_pads[i];
+        LOG("hotplug: GameController disconnected (instance %d): %s",
+            instanceId, removed ? SDL_GameControllerName(removed) : "?");
+        if (removed) SDL_GameControllerClose(removed);
+
+        // Compact the array - shift everything after i down by one so there
+        // are no holes for SelectActivePad()/RescanIfNeeded() to trip over.
+        for (int j = i; j < g_padCount - 1; ++j) {
+            g_pads[j]           = g_pads[j + 1];
+            g_padInstanceIds[j] = g_padInstanceIds[j + 1];
+        }
+        g_padCount--;
+        g_pads[g_padCount]           = nullptr;
+        g_padInstanceIds[g_padCount] = -1;
+
+        if (g_pad == removed) {
+            // Fall back to whatever's left, if anything. If the ini pins a
+            // specific controllerIndex the user just unplugged, we still
+            // fall back rather than going silent - SelectActivePad() only
+            // auto-switches when controllerIndex is unset (-1) anyway.
+            g_pad = (g_padCount > 0) ? g_pads[0] : nullptr;
+            LOG("hotplug: active pad disconnected, %s",
+                g_pad ? SDL_GameControllerName(g_pad) : "no pads remain");
+        }
+        return;
+    }
+}
+
+static void OpenRawJoystick(int deviceIndex)
+{
+    if (g_joy) return; // already have one open
+    g_joy = SDL_JoystickOpen(deviceIndex);
+    if (!g_joy) return;
+    g_joyInstanceId = SDL_JoystickInstanceID(g_joy);
+    LOG("opened raw Joystick (instance %d) '%s' (axes=%d buttons=%d hats=%d)",
+        g_joyInstanceId, SDL_JoystickName(g_joy), SDL_JoystickNumAxes(g_joy),
+        SDL_JoystickNumButtons(g_joy), SDL_JoystickNumHats(g_joy));
+}
+
+static void RemoveRawJoystickIfMatches(SDL_JoystickID instanceId)
+{
+    if (!g_joy || g_joyInstanceId != instanceId) return;
+    LOG("hotplug: raw Joystick disconnected (instance %d)", instanceId);
+    SDL_JoystickClose(g_joy);
+    g_joy = nullptr;
+    g_joyInstanceId = -1;
+    g_rawFallbackFirstSeenUnmapped = 0; // let the fallback re-arm cleanly
+}
+
+// ---------------------------------------------------------------------------
+//  Event-driven hotplug
+//
+//  Drains the SDL event queue looking for SDL_JOYDEVICEADDED/REMOVED. These
+//  fire for every joystick - GameController-mapped or not - unlike the
+//  SDL_CONTROLLERDEVICE* variants, which is what the raw fallback path
+//  needs. SDL_JOYDEVICEADDED reports a device index (usable with
+//  SDL_GameControllerOpen/SDL_JoystickOpen); SDL_JOYDEVICEREMOVED reports an
+//  instance ID (device indices aren't stable across a removal, since the
+//  slot gets reused).
+//
+//  Safe to call every frame - if nothing changed, SDL_PollEvent just
+//  returns false immediately. This DLL doesn't have an SDL window and isn't
+//  otherwise pumping the SDL event queue, so it's fine to fully drain it
+//  here; if that ever changes, switch to SDL_PeepEvents so other event
+//  types aren't silently eaten.
+// ---------------------------------------------------------------------------
+void Proxy_HandleHotplugEvents()
+{
+    SDL_Event ev;
+    while (SDL_PollEvent(&ev)) {
+        switch (ev.type) {
+        case SDL_JOYDEVICEADDED: {
+            int deviceIndex = ev.jdevice.which;
+            if (SDL_IsGameController(deviceIndex)) {
+                OpenControllerAtDeviceIndex(deviceIndex);
+                // A GameController showed up - if the raw-fallback timer was
+                // running for some other unmapped device, let it re-check
+                // from scratch next call rather than firing on stale state.
+                g_rawFallbackFirstSeenUnmapped = 0;
+            } else {
+                LOG("hotplug: joystick added, no GameController mapping (device %d): %s",
+                    deviceIndex, SDL_JoystickNameForIndex(deviceIndex));
+                // Actual opening (if AllowRawFallback=1) happens in
+                // MaybeOpenRawFallback() after its debounce delay, not here.
+            }
+            break;
+        }
+        case SDL_JOYDEVICEREMOVED: {
+            SDL_JoystickID instanceId = ev.jdevice.which;
+            RemoveControllerByInstanceId(instanceId);
+            RemoveRawJoystickIfMatches(instanceId);
+            break;
+        }
+        default:
+            break;
+        }
+    }
+}
+
+// Opt-in raw fallback (AllowRawFallback=1 in PadOfTime.ini): if nothing with
+// a real GameController mapping ever shows up, wait a bit - in case HIDAPI
+// is about to claim the device and give it one - then grab the first
+// unmapped joystick and read it generically. See the original design note
+// on Proxy_FillJoyBuffer's raw-Joystick branch for what "generic" means.
+static void MaybeOpenRawFallback()
+{
+    if (!g_cfg.allowRawFallback || g_padCount != 0 || g_joy) {
+        g_rawFallbackFirstSeenUnmapped = 0;
+        return;
+    }
+    int nj = SDL_NumJoysticks();
+    if (nj == 0) {
+        g_rawFallbackFirstSeenUnmapped = 0;
+        return;
+    }
+    DWORD now = GetTickCount();
+    if (g_rawFallbackFirstSeenUnmapped == 0) g_rawFallbackFirstSeenUnmapped = now;
+    if (now - g_rawFallbackFirstSeenUnmapped > 3000) {
+        for (int i = 0; i < nj; ++i) {
+            if (SDL_IsGameController(i)) continue; // shouldn't happen (g_padCount==0), but be safe
+            OpenRawJoystick(i);
+            if (g_joy) break;
+        }
     }
 }
 
@@ -89,15 +257,11 @@ void Proxy_InitInput()
     for (int i = 0; i < nj; ++i)
         LOG("  joy[%d] name='%s' isGC=%d", i, SDL_JoystickNameForIndex(i), SDL_IsGameController(i));
 
+    for (int i = 0; i < MAX_PADS; ++i) g_padInstanceIds[i] = -1;
+
     for (int i = 0; i < nj && g_padCount < MAX_PADS; ++i) {
         if (SDL_IsGameController(i)) {
-            SDL_GameController* c = SDL_GameControllerOpen(i);
-            if (c) {
-                g_pads[g_padCount++] = c;
-                LOG("opened GameController %d: %s", i, SDL_GameControllerName(c));
-            } else {
-                LOG("SDL_GameControllerOpen(%d) failed: %s", i, SDL_GetError());
-            }
+            OpenControllerAtDeviceIndex(i);
         }
     }
 
@@ -110,62 +274,36 @@ void Proxy_InitInput()
     }
 
     if (g_padCount == 0 && nj > 0) {
-        g_joy = SDL_JoystickOpen(0);
-        if (g_joy)
-            LOG("opened raw Joystick 0: %s (axes=%d buttons=%d hats=%d)",
-                SDL_JoystickName(g_joy), SDL_JoystickNumAxes(g_joy),
-                SDL_JoystickNumButtons(g_joy), SDL_JoystickNumHats(g_joy));
+        OpenRawJoystick(0);
     }
     if (!g_pad && !g_joy) LOG("no SDL device opened at init");
+
+    // The device-detection thread (and SDL_Init itself) queues one
+    // SDL_JOYDEVICEADDED per already-connected joystick. We've just handled
+    // that initial connect state by hand above, so drop those events now -
+    // otherwise the first Proxy_HandleHotplugEvents() call would try to open
+    // every device a second time (SDL_GameControllerOpen on an already-open
+    // instance just hands back the same handle, which would corrupt g_pads).
+    SDL_PumpEvents();
+    SDL_FlushEvent(SDL_JOYDEVICEADDED);
 }
 
 static void RescanIfNeeded()
 {
-    SDL_PumpEvents();
-    int nj = SDL_NumJoysticks();
+    // Event-driven hotplug: opens newly-connected GameControllers and closes
+    // (and un-registers) ones that disappear, keyed by stable instance ID.
+    // Replaces the old "re-poll SDL_NumJoysticks every 500ms" approach,
+    // which could never detect a disconnect at all - a pad could unplug and
+    // Proxy_FillJoyBuffer would keep calling SDL_GameControllerGetButton on
+    // a dead handle indefinitely (harmless in modern SDL2, which just
+    // returns 0/neutral for a detached device, but it never noticed and
+    // never freed the slot for a replacement pad either).
+    Proxy_HandleHotplugEvents();
 
-    if (g_padCount == 0) {
-        static DWORD lastScan = 0;
-        DWORD now = GetTickCount();
-        if (now - lastScan >= 500) {
-            lastScan = now;
-            for (int i = 0; i < nj && g_padCount < MAX_PADS; ++i) {
-                if (SDL_IsGameController(i)) {
-                    SDL_GameController* c = SDL_GameControllerOpen(i);
-                    if (c) {
-                        g_pads[g_padCount++] = c;
-                        if (!g_pad) g_pad = c;
-                        LOG("rescan: opened GameController %d: %s", i, SDL_GameControllerName(c));
-                    }
-                }
-            }
-        }
-    }
-
-    // Raw fallback: some pads never get a GameController mapping (e.g. a
-    // Switch Pro Controller whose HIDAPI driver couldn't claim the device).
-    // OFF by default - it's a blind numeric guess, not a real mapping, and
-    // masks the real problem (something else holding the HID handle, or a
-    // whitelist gap in this SDL build). Opt in via AllowRawFallback=1 in
-    // PadOfTime.ini only if you've exhausted the hidapi troubleshooting in
-    // README and just want *something* working meanwhile.
-    if (g_cfg.allowRawFallback && g_padCount == 0 && !g_joy && nj > 0) {
-        static DWORD firstSeenUnmapped = 0;
-        DWORD now = GetTickCount();
-        if (firstSeenUnmapped == 0) firstSeenUnmapped = now;
-        if (now - firstSeenUnmapped > 3000) {
-            for (int i = 0; i < nj; ++i) {
-                g_joy = SDL_JoystickOpen(i);
-                if (g_joy) {
-                    LOG("raw fallback: opened Joystick %d '%s' (axes=%d buttons=%d hats=%d) - "
-                        "no GameController mapping available, using generic raw axis/button reading",
-                        i, SDL_JoystickName(g_joy), SDL_JoystickNumAxes(g_joy),
-                        SDL_JoystickNumButtons(g_joy), SDL_JoystickNumHats(g_joy));
-                    break;
-                }
-            }
-        }
-    }
+    // Raw fallback (AllowRawFallback=1) still runs on its own debounce
+    // timer rather than opening the instant we see an unmapped device - see
+    // MaybeOpenRawFallback for why.
+    MaybeOpenRawFallback();
 }
 
 static void SelectActivePad()
@@ -193,10 +331,14 @@ static void SelectActivePad()
 
 void Proxy_ShutdownInput()
 {
-    for (int i = 0; i < g_padCount; ++i)
+    for (int i = 0; i < g_padCount; ++i) {
         if (g_pads[i]) SDL_GameControllerClose(g_pads[i]);
+        g_padInstanceIds[i] = -1;
+    }
     g_padCount = 0; g_pad = nullptr;
     if (g_joy) { SDL_JoystickClose(g_joy); g_joy = nullptr; }
+    g_joyInstanceId = -1;
+    g_rawFallbackFirstSeenUnmapped = 0;
     SDL_QuitSubSystem(SDL_INIT_GAMECONTROLLER | SDL_INIT_JOYSTICK);
 }
 
@@ -376,8 +518,24 @@ void Proxy_FillJoyBuffer(void* buf, int buttonsCapacity)
     if (g_cfg.invertCameraY) ry = -ry;
 
     // --- triggers -> combined axis ---
-    float rt = SDL_GameControllerGetAxis(g_pad, SDL_CONTROLLER_AXIS_TRIGGERRIGHT) / 32767.f;
-    float lt = SDL_GameControllerGetAxis(g_pad, SDL_CONTROLLER_AXIS_TRIGGERLEFT)  / 32767.f;
+    //float rt = SDL_GameControllerGetAxis(g_pad, SDL_CONTROLLER_AXIS_TRIGGERRIGHT) / 32767.f;
+    //float lt = SDL_GameControllerGetAxis(g_pad, SDL_CONTROLLER_AXIS_TRIGGERLEFT)  / 32767.f;
+    const Sint16 triggerThreshold = 16384; // Approximately 50% pressed
+    Sint16 rt = SDL_GameControllerGetAxis(g_pad, SDL_CONTROLLER_AXIS_TRIGGERRIGHT);
+    Sint16 lt = SDL_GameControllerGetAxis(g_pad, SDL_CONTROLLER_AXIS_TRIGGERLEFT);
+
+    // Left Trigger
+    if (lt >= triggerThreshold)
+    {
+        base[48 + g_cfg.btnLT] = 0x80;
+    }
+
+    // Right Trigger
+    if (rt >= triggerThreshold)
+    {
+        base[48 + g_cfg.btnRT] = 0x80;
+    }
+
     if (rt < 0.f) rt = 0.f;
     if (lt < 0.f) lt = 0.f;
     float z = g_cfg.swapTriggers ? (lt - rt) : (rt - lt);
@@ -399,10 +557,10 @@ void Proxy_FillJoyBuffer(void* buf, int buttonsCapacity)
         int ofs = 48 + idx;
         base[ofs] = 0x80;
     };
-    set(SDL_CONTROLLER_BUTTON_A,             g_cfg.btnA);
-    set(SDL_CONTROLLER_BUTTON_B,             g_cfg.btnB);
-    set(SDL_CONTROLLER_BUTTON_X,             g_cfg.btnX);
-    set(SDL_CONTROLLER_BUTTON_Y,             g_cfg.btnY);
+    set(SDL_CONTROLLER_BUTTON_A,             g_cfg.btnX);
+    set(SDL_CONTROLLER_BUTTON_B,             g_cfg.btnY);
+    set(SDL_CONTROLLER_BUTTON_X,             g_cfg.btnA);
+    set(SDL_CONTROLLER_BUTTON_Y,             g_cfg.btnB);
     set(SDL_CONTROLLER_BUTTON_LEFTSHOULDER,  g_cfg.btnLB);
     set(SDL_CONTROLLER_BUTTON_RIGHTSHOULDER, g_cfg.btnRB);
     // Start is fully repurposed for the MenuMode Escape hotkey when
