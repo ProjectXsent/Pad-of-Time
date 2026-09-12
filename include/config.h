@@ -70,10 +70,12 @@ struct Config
     int btnY  = 3;
     int btnLB = 4;
     int btnRB = 5;
-    int btnBack  = 6;
-    int btnStart = 7;
-    int btnLS = 8;
-    int btnRS = 9;
+    int btnLT  = 6;
+    int btnRT = 7;
+    int btnBack  = 8;
+    int btnStart = 9;
+    int btnLS = 10;
+    int btnRS = 11;
 
     // --- Controller Menu Mode ---
     // The game (unlike its sequel) can't navigate menus with a controller at
@@ -82,7 +84,7 @@ struct Config
     // (2) ToggleButton flips a virtual mouse on/off, driven by the right
     // stick, with ClickButton as the left mouse button. See README for the
     // full writeup.
-    bool  enableMenuMode       = true;
+    bool  enableMenuMode       = false;
     std::string escapeButton      = "start";
     std::string mouseToggleButton = "back";
     std::string mouseClickButton  = "x";
