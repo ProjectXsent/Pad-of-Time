@@ -48,6 +48,12 @@ struct Config
     // --- trigger -> Z axis direction ---
     bool swapTriggers = false;   // false: RT -> Z(+), LT -> Z(-)
 
+    // --- triggers as DirectInput buttons
+    bool triggersAsButtons = false;
+    int   btnLT = 6;   // 0-indexed -> "Button 7"
+    int   btnRT = 7;   // 0-indexed -> "Button 8"
+    float triggerButtonThreshold = 0.5f;
+
     // --- axis routing ---
     //   cameraOnZRz=false: right stick -> lRx/lRy, triggers -> lZ  (default)
     //   cameraOnZRz=true : right stick -> lZ/lRz,  triggers -> lRx
@@ -70,8 +76,8 @@ struct Config
     int btnY  = 3;
     int btnLB = 4;
     int btnRB = 5;
-    int btnLT  = 6;
-    int btnRT = 7;
+    //int btnLT = 6;
+    //int btnRT = 7;
     int btnBack  = 8;
     int btnStart = 9;
     int btnLS = 10;
@@ -85,8 +91,8 @@ struct Config
     // stick, with ClickButton as the left mouse button. See README for the
     // full writeup.
     bool  enableMenuMode       = false;
-    std::string escapeButton      = "start";
     std::string mouseToggleButton = "back";
+    std::string escapeButton      = "start";
     std::string mouseClickButton  = "x";
     float menuCursorSpeed     = 900.0f;  // pixels/sec at full stick deflection
     float menuDeadzone        = 0.15f;
